@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef } from "react";
-import { db } from "./firebase";
+import { db, auth, googleProvider } from "./firebase";
 import { doc, getDoc, setDoc } from "firebase/firestore";
+import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 
 // ─── Data ────────────────────────────────────────────────────────────────────
-
-const USER_DOC_ID = "default_user"; // Change this if you add auth later
 
 const data = {
   sections: [
@@ -428,12 +427,29 @@ export default function App() {
   const [expandedCategories, setExpandedCategories] = useState({});
   const [status, setStatus] = useState("loading"); // loading | ready | saving | error
   const saveTimer = useRef(null);
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
-  // Load progress from Firestore on mount
+  // Listen for auth state changes
   useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      setUser(firebaseUser);
+      setAuthLoading(false);
+      if (!firebaseUser) {
+        setChecked({});
+        setStatus("loading");
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Load progress from Firestore when user signs in
+  useEffect(() => {
+    if (!user) return;
+    setStatus("loading");
     (async () => {
       try {
-        const ref = doc(db, "progress", USER_DOC_ID);
+        const ref = doc(db, "progress", user.uid);
         const snap = await getDoc(ref);
         if (snap.exists()) {
           setChecked(snap.data().checked || {});
@@ -444,16 +460,16 @@ export default function App() {
         setStatus("error");
       }
     })();
-  }, []);
+  }, [user]);
 
   // Debounced save to Firestore whenever checked changes
   useEffect(() => {
-    if (status === "loading") return;
+    if (status === "loading" || !user) return;
     clearTimeout(saveTimer.current);
     setStatus("saving");
     saveTimer.current = setTimeout(async () => {
       try {
-        const ref = doc(db, "progress", USER_DOC_ID);
+        const ref = doc(db, "progress", user.uid);
         await setDoc(ref, { checked, updatedAt: new Date().toISOString() });
         setStatus("ready");
       } catch (e) {
@@ -461,7 +477,7 @@ export default function App() {
         setStatus("error");
       }
     }, 1000);
-  }, [checked]);
+  }, [checked, user]);
 
   const toggle = (id) => setChecked((prev) => ({ ...prev, [id]: !prev[id] }));
 
@@ -482,6 +498,46 @@ export default function App() {
     saving: "💾 Saving...",
     error: "⚠️ Save failed — check Firebase config",
   };
+
+  if (authLoading) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#fafaf9", fontFamily: "'DM Sans', sans-serif" }}>
+        <div style={{ textAlign: "center", color: "#6b7280" }}>
+          <div style={{ fontSize: 32, marginBottom: 12 }}>⏳</div>
+          <p style={{ fontSize: 15 }}>Checking authentication...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#111827", fontFamily: "'DM Sans', sans-serif" }}>
+        <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+        <div style={{ background: "#1f2937", borderRadius: 16, padding: "48px 40px", textAlign: "center", boxShadow: "0 8px 32px rgba(0,0,0,0.3)", maxWidth: 400, width: "100%", margin: "0 16px" }}>
+          <div style={{ width: 56, height: 56, borderRadius: 14, background: "#374151", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", fontSize: 24, color: "#fff" }}>
+            ✓
+          </div>
+          <h1 style={{ fontSize: 22, fontWeight: 700, color: "#fff", margin: "0 0 6px" }}>Frontend Interview Prep</h1>
+          <p style={{ fontSize: 14, color: "#9ca3af", margin: "0 0 32px" }}>Sign in to save your progress across devices</p>
+          <button
+            onClick={() => signInWithPopup(auth, googleProvider).catch(console.error)}
+            style={{ display: "inline-flex", alignItems: "center", gap: 10, padding: "12px 28px", fontSize: 14, fontWeight: 600, fontFamily: "inherit", color: "#111827", background: "#fff", border: "none", borderRadius: 10, cursor: "pointer", transition: "all 0.15s", boxShadow: "0 2px 8px rgba(0,0,0,0.2)" }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = "#f3f4f6"; e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.3)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "#fff"; e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,0.2)"; }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24">
+              <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/>
+              <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+              <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+              <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+            </svg>
+            Sign in with Google
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (status === "loading") {
     return (
@@ -509,6 +565,12 @@ export default function App() {
             <div style={{ textAlign: "right" }}>
               <div style={{ color: "#fff", fontSize: 28, fontWeight: 700, lineHeight: 1 }}>{progress}%</div>
               <div style={{ color: "#6b7280", fontSize: 12, marginTop: 2 }}>{checkedCount}/{totalProblems} done</div>
+              <button
+                onClick={() => signOut(auth)}
+                style={{ fontSize: 11, color: "#6b7280", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", textDecoration: "underline", marginTop: 4, padding: 0 }}
+              >
+                Sign out ({user.displayName?.split(" ")[0] || user.email})
+              </button>
             </div>
           </div>
 
