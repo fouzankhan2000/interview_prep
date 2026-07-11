@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { db, auth, googleProvider } from "./firebase";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
+import { getRevisionLink } from "./data/links";
 
 // ─── Data ────────────────────────────────────────────────────────────────────
 
@@ -419,10 +420,232 @@ const priorityColors = {
   "📋 Checklist": { bg: "#eff6ff", text: "#2563eb", border: "#93c5fd" },
 };
 
+const today = () => new Date().toISOString().split("T")[0];
+
+const resolveKey = (key) => {
+  const parts = key.split("-");
+  // sectionId may contain hyphens? No — all section ids are single words: dsa, js, react, lld, hld, browser, behavioral
+  // key format: "sectionId-catIndex-probIndex"
+  const pi = Number(parts[parts.length - 1]);
+  const ci = Number(parts[parts.length - 2]);
+  const sid = parts.slice(0, parts.length - 2).join("-");
+  const section = data.sections.find((s) => s.id === sid);
+  const cat = section?.categories[ci];
+  const problem = cat?.problems[pi];
+  return { sectionId: sid, sectionTitle: section?.title, categoryName: cat?.name, problemName: problem, sectionColor: section?.color };
+};
+
+const createRevisionEntry = (todayStr) => {
+  const nextDue = new Date(Date.now() + 86400000).toISOString().split("T")[0];
+  return { interval: 1, nextDue, lastReviewed: todayStr, reviewCount: 0, lastRating: null };
+};
+
+const applyRating = (entry, rating, todayStr) => {
+  let interval = entry.interval;
+  if (rating === "Easy")   interval = Math.min(60, Math.ceil(interval * 1.75));
+  if (rating === "Good")   interval = Math.min(60, Math.ceil(interval * 1.15));
+  if (rating === "Hard")   interval = Math.max(1,  Math.ceil(interval * 0.9));
+  if (rating === "Forgot") interval = 1;
+  const nextDue = new Date(Date.now() + interval * 86400000).toISOString().split("T")[0];
+  return { interval, nextDue, lastReviewed: todayStr, reviewCount: (entry.reviewCount || 0) + 1, lastRating: rating };
+};
+
+// ─── ReviseRow ────────────────────────────────────────────────────────────────
+
+const RATING_BUTTONS = [
+  { label: "Easy",   color: "#10b981", bg: "#ecfdf5", border: "#a7f3d0" },
+  { label: "Good",   color: "#3b82f6", bg: "#eff6ff", border: "#bfdbfe" },
+  { label: "Hard",   color: "#f97316", bg: "#fff7ed", border: "#fed7aa" },
+  { label: "Forgot", color: "#ef4444", bg: "#fef2f2", border: "#fecaca" },
+];
+
+function ReviseRow({ problemKey, revision, onRate, onRestore }) {
+  const { sectionId, sectionTitle, categoryName, problemName, sectionColor } = resolveKey(problemKey);
+  const link = getRevisionLink(sectionId, problemName);
+
+  const [revealed, setRevealed] = useState(false);
+  const [selectedRating, setSelectedRating] = useState(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [snapshot, setSnapshot] = useState(null);
+
+  const handleCheck = () => {
+    if (!selectedRating || confirmed) return;
+    setSnapshot(revision);
+    onRate(problemKey, selectedRating);
+    setConfirmed(true);
+  };
+
+  const handleUncheck = () => {
+    if (snapshot) onRestore(problemKey, snapshot);
+    setSelectedRating(null);
+    setConfirmed(false);
+    setSnapshot(null);
+  };
+
+  return (
+    <div style={{
+      background: confirmed ? "#f0fdf4" : "#fff",
+      border: "1.5px solid #e5e7eb",
+      borderRadius: 12,
+      overflow: "hidden",
+      boxShadow: "0 1px 3px rgba(0,0,0,0.05)",
+      transition: "background 0.15s",
+    }}>
+      <div style={{ padding: "14px 16px" }}>
+        {/* Row header: checkbox + problem text */}
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 8 }}>
+          {/* Custom checkbox */}
+          <div
+            onClick={confirmed ? handleUncheck : (selectedRating ? handleCheck : undefined)}
+            style={{
+              width: 18, height: 18, borderRadius: 5, flexShrink: 0, marginTop: 2,
+              border: confirmed ? `2px solid ${sectionColor}` : `2px solid ${selectedRating ? "#f59e0b" : "#d1d5db"}`,
+              background: confirmed ? sectionColor : "#fff",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              cursor: selectedRating || confirmed ? "pointer" : "not-allowed",
+              opacity: !selectedRating && !confirmed ? 0.45 : 1,
+              transition: "all 0.15s",
+            }}
+          >
+            {confirmed && <span style={{ color: "#fff", fontSize: 11, fontWeight: 700 }}>✓</span>}
+          </div>
+
+          <div style={{ flex: 1 }}>
+            <span style={{
+              fontSize: 13.5, lineHeight: 1.5, fontWeight: confirmed ? 400 : 500,
+              color: confirmed ? "#6b7280" : "#1f2937",
+              textDecoration: confirmed ? "line-through" : "none",
+            }}>
+              {problemName}
+            </span>
+          </div>
+        </div>
+
+        {/* Tags */}
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: confirmed ? 0 : 10 }}>
+          <span style={{
+            fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 99,
+            background: sectionColor + "22", color: sectionColor, border: `1px solid ${sectionColor}44`,
+          }}>
+            {sectionTitle} · {categoryName}
+          </span>
+          <span style={{ fontSize: 11, fontWeight: 500, padding: "2px 8px", borderRadius: 99, background: "#f5f3ff", color: "#7c3aed", border: "1px solid #ddd6fe" }}>
+            ×{revision?.reviewCount || 0} reviewed
+          </span>
+          {revision?.nextDue && (
+            <span style={{ fontSize: 11, fontWeight: 500, padding: "2px 8px", borderRadius: 99, background: "#f9fafb", color: "#6b7280", border: "1px solid #e5e7eb" }}>
+              due {revision.nextDue}
+            </span>
+          )}
+        </div>
+
+        {/* Confirmed state */}
+        {confirmed && (
+          <p style={{ margin: "6px 0 0", fontSize: 12, color: "#6b7280" }}>Done for today</p>
+        )}
+
+        {/* Reveal / rating area — hidden when confirmed */}
+        {!confirmed && (
+          <>
+            {!revealed ? (
+              <button
+                onClick={() => setRevealed(true)}
+                style={{
+                  marginTop: 2, padding: "5px 12px", borderRadius: 8,
+                  border: "1.5px solid #e5e7eb", background: "#f9fafb",
+                  fontSize: 12, fontWeight: 600, color: "#374151",
+                  fontFamily: "inherit", cursor: "pointer", transition: "all 0.15s",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "#f3f4f6"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "#f9fafb"; }}
+              >
+                Reveal →
+              </button>
+            ) : (
+              <div>
+                {link && (
+                  <a
+                    href={link}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      display: "inline-block", marginBottom: 10,
+                      fontSize: 12, fontWeight: 600, color: "#3b82f6",
+                      textDecoration: "none",
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.textDecoration = "underline"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.textDecoration = "none"; }}
+                  >
+                    Open reference ↗
+                  </a>
+                )}
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {RATING_BUTTONS.map(({ label, color, bg, border }) => {
+                    const isSelected = selectedRating === label;
+                    return (
+                      <button
+                        key={label}
+                        onClick={() => setSelectedRating(label)}
+                        style={{
+                          padding: "6px 14px", borderRadius: 8,
+                          border: `1.5px solid ${isSelected ? color : border}`,
+                          background: isSelected ? color : bg,
+                          color: isSelected ? "#fff" : color,
+                          fontSize: 12, fontWeight: 600, fontFamily: "inherit",
+                          cursor: "pointer", transition: "all 0.15s",
+                          opacity: selectedRating && !isSelected ? 0.45 : 1,
+                        }}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── ReviseView ───────────────────────────────────────────────────────────────
+
+function ReviseView({ dueKeys, revisions, onRate, onRestore }) {
+  if (dueKeys.length === 0) {
+    return (
+      <div style={{ textAlign: "center", padding: "60px 24px", color: "#6b7280" }}>
+        <div style={{ fontSize: 40, marginBottom: 12 }}>🎉</div>
+        <p style={{ fontSize: 16, fontWeight: 600, color: "#111827", margin: "0 0 6px" }}>All caught up!</p>
+        <p style={{ fontSize: 14, margin: 0 }}>Nothing due for revision today.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <p style={{ margin: "0 0 4px", fontSize: 13, color: "#6b7280" }}>
+        {dueKeys.length} problem{dueKeys.length !== 1 ? "s" : ""} due today
+      </p>
+      {dueKeys.map((key) => (
+        <ReviseRow
+          key={key}
+          problemKey={key}
+          revision={revisions[key]}
+          onRate={onRate}
+          onRestore={onRestore}
+        />
+      ))}
+    </div>
+  );
+}
+
 // ─── App ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [checked, setChecked] = useState({});
+  const [revisions, setRevisions] = useState({});
   const [activeSection, setActiveSection] = useState("dsa");
   const [expandedCategories, setExpandedCategories] = useState({});
   const [status, setStatus] = useState("loading"); // loading | ready | saving | error
@@ -437,6 +660,7 @@ export default function App() {
       setAuthLoading(false);
       if (!firebaseUser) {
         setChecked({});
+        setRevisions({});
         setStatus("loading");
       }
     });
@@ -453,6 +677,7 @@ export default function App() {
         const snap = await getDoc(ref);
         if (snap.exists()) {
           setChecked(snap.data().checked || {});
+          setRevisions(snap.data().revisions || {});
         }
         setStatus("ready");
       } catch (e) {
@@ -462,7 +687,7 @@ export default function App() {
     })();
   }, [user]);
 
-  // Debounced save to Firestore whenever checked changes
+  // Debounced save to Firestore whenever checked or revisions change
   useEffect(() => {
     if (status === "loading" || !user) return;
     clearTimeout(saveTimer.current);
@@ -470,16 +695,40 @@ export default function App() {
     saveTimer.current = setTimeout(async () => {
       try {
         const ref = doc(db, "progress", user.uid);
-        await setDoc(ref, { checked, updatedAt: new Date().toISOString() });
+        await setDoc(ref, { checked, revisions, updatedAt: new Date().toISOString() });
         setStatus("ready");
       } catch (e) {
         console.error("Failed to save:", e);
         setStatus("error");
       }
     }, 1000);
-  }, [checked, user]);
+  }, [checked, revisions, user]);
 
-  const toggle = (id) => setChecked((prev) => ({ ...prev, [id]: !prev[id] }));
+  const toggle = (id) => {
+    setChecked((prev) => {
+      const wasUnchecked = !prev[id];
+      if (wasUnchecked) {
+        setRevisions((prevRev) => {
+          if (!prevRev[id]) {
+            return { ...prevRev, [id]: createRevisionEntry(today()) };
+          }
+          return prevRev;
+        });
+      }
+      return { ...prev, [id]: !prev[id] };
+    });
+  };
+
+  const rateRevision = (key, rating) => {
+    setRevisions((prev) => {
+      const entry = prev[key] || { interval: 1, reviewCount: 0 };
+      return { ...prev, [key]: applyRating(entry, rating, today()) };
+    });
+  };
+
+  const restoreRevision = (key, entry) => {
+    setRevisions((prev) => ({ ...prev, [key]: entry }));
+  };
 
   const toggleCategory = (id) =>
     setExpandedCategories((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -490,6 +739,14 @@ export default function App() {
 
   const checkedCount = Object.values(checked).filter(Boolean).length;
   const progress = Math.round((checkedCount / totalProblems) * 100);
+
+  const todayStr = today();
+  const dueKeys = Object.entries(revisions)
+    .filter(([, v]) => v.nextDue <= todayStr)
+    .sort(([, a], [, b]) => a.nextDue.localeCompare(b.nextDue))
+    .map(([k]) => k);
+  const dueCount = dueKeys.length;
+
   const activeData = data.sections.find((s) => s.id === activeSection);
 
   const statusLabel = {
@@ -586,7 +843,7 @@ export default function App() {
             </span>
             {checkedCount > 0 && (
               <button
-                onClick={() => { if (window.confirm("Reset all progress? This cannot be undone.")) setChecked({}); }}
+                onClick={() => { if (window.confirm("Reset all progress? This cannot be undone.")) { setChecked({}); setRevisions({}); } }}
                 style={{ fontSize: 11, color: "#6b7280", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}
               >
                 Reset progress
@@ -596,6 +853,20 @@ export default function App() {
 
           {/* Section tabs */}
           <div style={{ display: "flex", gap: 6, marginTop: 16, flexWrap: "wrap" }}>
+            {/* Revise tab — pinned first */}
+            <button
+              onClick={() => setActiveSection("revise")}
+              style={{
+                padding: "5px 12px", borderRadius: 99, border: "none", cursor: "pointer",
+                fontSize: 12, fontWeight: 600, fontFamily: "inherit", transition: "all 0.15s",
+                background: activeSection === "revise" ? "#f59e0b" : "#1f2937",
+                color: activeSection === "revise" ? "#fff" : dueCount > 0 ? "#f59e0b" : "#4b5563",
+                opacity: dueCount === 0 && activeSection !== "revise" ? 0.6 : 1,
+              }}
+            >
+              📅 Revise{dueCount > 0 ? ` (${dueCount})` : ""}
+            </button>
+
             {data.sections.map((s) => (
               <button
                 key={s.id}
@@ -616,62 +887,79 @@ export default function App() {
 
       {/* Content */}
       <div style={{ maxWidth: 900, margin: "0 auto", padding: "24px 16px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20 }}>
-          <div style={{ width: 10, height: 10, borderRadius: "50%", background: activeData.color }} />
-          <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: "#111827" }}>{activeData.title}</h2>
-        </div>
+        {activeSection === "revise" ? (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20 }}>
+              <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#f59e0b" }} />
+              <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: "#111827" }}>Spaced Repetition Review</h2>
+            </div>
+            <ReviseView
+              dueKeys={dueKeys}
+              revisions={revisions}
+              onRate={rateRevision}
+              onRestore={restoreRevision}
+            />
+          </>
+        ) : (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20 }}>
+              <div style={{ width: 10, height: 10, borderRadius: "50%", background: activeData.color }} />
+              <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: "#111827" }}>{activeData.title}</h2>
+            </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {activeData.categories.map((cat, ci) => {
-            const catKey = `${activeData.id}-${ci}`;
-            const isExpanded = expandedCategories[catKey] !== false;
-            const pStyle = priorityColors[cat.priority] || priorityColors["🟡 Medium"];
-            const catChecked = cat.problems.filter((_, pi) => checked[`${activeData.id}-${ci}-${pi}`]).length;
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {activeData.categories.map((cat, ci) => {
+                const catKey = `${activeData.id}-${ci}`;
+                const isExpanded = expandedCategories[catKey] !== false;
+                const pStyle = priorityColors[cat.priority] || priorityColors["🟡 Medium"];
+                const catChecked = cat.problems.filter((_, pi) => checked[`${activeData.id}-${ci}-${pi}`]).length;
 
-            return (
-              <div key={ci} style={{ background: "#fff", border: `1.5px solid ${activeData.border}`, borderRadius: 12, overflow: "hidden", boxShadow: "0 1px 3px rgba(0,0,0,0.05)" }}>
-                <button
-                  onClick={() => toggleCategory(catKey)}
-                  style={{ width: "100%", padding: "14px 16px", background: activeData.accent, border: "none", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontFamily: "inherit" }}
-                >
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                    <span style={{ fontSize: 14, fontWeight: 700, color: "#111827", textAlign: "left" }}>{cat.name}</span>
-                    <span style={{ fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 99, background: pStyle.bg, color: pStyle.text, border: `1px solid ${pStyle.border}` }}>{cat.priority}</span>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                    <span style={{ fontSize: 12, color: "#6b7280", fontFamily: "'DM Mono', monospace" }}>{catChecked}/{cat.problems.length}</span>
-                    <span style={{ color: "#9ca3af", fontSize: 16, transform: isExpanded ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.2s", display: "block" }}>▾</span>
-                  </div>
-                </button>
+                return (
+                  <div key={ci} style={{ background: "#fff", border: `1.5px solid ${activeData.border}`, borderRadius: 12, overflow: "hidden", boxShadow: "0 1px 3px rgba(0,0,0,0.05)" }}>
+                    <button
+                      onClick={() => toggleCategory(catKey)}
+                      style={{ width: "100%", padding: "14px 16px", background: activeData.accent, border: "none", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontFamily: "inherit" }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 14, fontWeight: 700, color: "#111827", textAlign: "left" }}>{cat.name}</span>
+                        <span style={{ fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 99, background: pStyle.bg, color: pStyle.text, border: `1px solid ${pStyle.border}` }}>{cat.priority}</span>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                        <span style={{ fontSize: 12, color: "#6b7280", fontFamily: "'DM Mono', monospace" }}>{catChecked}/{cat.problems.length}</span>
+                        <span style={{ color: "#9ca3af", fontSize: 16, transform: isExpanded ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.2s", display: "block" }}>▾</span>
+                      </div>
+                    </button>
 
-                {isExpanded && (
-                  <div style={{ padding: "8px 0" }}>
-                    {cat.problems.map((problem, pi) => {
-                      const key = `${activeData.id}-${ci}-${pi}`;
-                      const done = !!checked[key];
-                      return (
-                        <label key={pi} style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "7px 16px", cursor: "pointer", background: done ? "#f0fdf4" : "transparent", transition: "background 0.15s" }}>
-                          <div
-                            onClick={() => toggle(key)}
-                            style={{ width: 18, height: 18, borderRadius: 5, border: done ? `2px solid ${activeData.color}` : "2px solid #d1d5db", background: done ? activeData.color : "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 1, transition: "all 0.15s", cursor: "pointer" }}
-                          >
-                            {done && <span style={{ color: "#fff", fontSize: 11, fontWeight: 700 }}>✓</span>}
-                          </div>
-                          <span
-                            onClick={() => toggle(key)}
-                            style={{ fontSize: 13.5, color: done ? "#6b7280" : "#1f2937", textDecoration: done ? "line-through" : "none", lineHeight: 1.5, fontWeight: done ? 400 : 500 }}
-                          >
-                            {problem}
-                          </span>
-                        </label>
-                      );
-                    })}
+                    {isExpanded && (
+                      <div style={{ padding: "8px 0" }}>
+                        {cat.problems.map((problem, pi) => {
+                          const key = `${activeData.id}-${ci}-${pi}`;
+                          const done = !!checked[key];
+                          return (
+                            <label key={pi} style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "7px 16px", cursor: "pointer", background: done ? "#f0fdf4" : "transparent", transition: "background 0.15s" }}>
+                              <div
+                                onClick={() => toggle(key)}
+                                style={{ width: 18, height: 18, borderRadius: 5, border: done ? `2px solid ${activeData.color}` : "2px solid #d1d5db", background: done ? activeData.color : "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 1, transition: "all 0.15s", cursor: "pointer" }}
+                              >
+                                {done && <span style={{ color: "#fff", fontSize: 11, fontWeight: 700 }}>✓</span>}
+                              </div>
+                              <span
+                                onClick={() => toggle(key)}
+                                style={{ fontSize: 13.5, color: done ? "#6b7280" : "#1f2937", textDecoration: done ? "line-through" : "none", lineHeight: 1.5, fontWeight: done ? 400 : 500 }}
+                              >
+                                {problem}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
+                );
+              })}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
